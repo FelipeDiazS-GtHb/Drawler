@@ -13,7 +13,6 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [showActions, setShowActions] = useState(false);
 
-  // Estados de Paginación y Filtros (Búsqueda rápida eliminada)
   const [pageSize, setPageSize] = useState(50);
   const [currentPage, setCurrentPage] = useState(1);
   const [colFilters, setColFilters] = useState({ CC_PACIENTE: '', CC_PROFESIONAL: '', SERVICIO: '', FECHA: '' });
@@ -33,7 +32,6 @@ function App() {
     setShowActions(false);
   }, [seccion]);
 
-  // LÓGICA DE FILTRADO (Solo Filtros del Panel Lateral)
   const filteredData = useMemo(() => {
     return rowData.filter(row => {
       const matchesCols = Object.keys(colFilters).every(key => {
@@ -62,6 +60,7 @@ function App() {
     setCurrentPage(1);
   };
 
+  // --- CARGUE ROBUSTO CON MANEJO DE ERRORES ---
   const handleFileUpload = async (tipo, e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -69,11 +68,22 @@ function App() {
     setShowActions(false);
     const fd = new FormData();
     fd.append("file", file);
+    
     try {
-        await fetch(`${API}/upload/${seccion}/${tipo}`, { method: "POST", body: fd });
-        cargarDatos();
-    } catch (err) { alert("Error al procesar archivo"); }
-    e.target.value = null;
+        const res = await fetch(`${API}/upload/${seccion}/${tipo}`, { method: "POST", body: fd });
+        if (!res.ok) {
+            const errorData = await res.json();
+            throw new Error(errorData.detail || "Error interno del servidor");
+        }
+        await cargarDatos();
+        setToast(`✅ Archivo cargado correctamente.`);
+        setTimeout(() => setToast(null), 3000);
+    } catch (err) { 
+        alert(`❌ Error al subir el archivo:\n${err.message}`); 
+    } finally {
+        setIsLoading(false);
+        e.target.value = null; // Reiniciar el input siempre
+    }
   };
 
   const getActionOptions = () => {
@@ -104,17 +114,26 @@ function App() {
 
       <div className={`backdrop ${isNavOpen || isFilterOpen ? 'open' : ''}`} onClick={() => { setIsNavOpen(false); setIsFilterOpen(false); }}></div>
 
-      {/* DRAWER NAVEGACIÓN */}
+      {/* DRAWER IZQUIERDO: NAVEGACIÓN Y LOGO */}
       <aside className={`drawer left-drawer ${isNavOpen ? 'open' : ''}`}>
         <div className="drawer-header">
-          <span className="drawer-title">MENÚ PRINCIPAL</span>
-          <button className="icon-btn" onClick={() => setIsNavOpen(false)}>✕</button>
+          <div className="brand-container">
+             <img src="/logo.png" alt="Logo" className="brand-logo" onError={(e) => e.target.style.display = 'none'} />
+             <div className="brand-text">
+                 <span className="brand-title">MTD Auditoría</span>
+                 <span className="brand-subtitle">Control Interno</span>
+             </div>
+          </div>
+          <button className="icon-btn no-border" onClick={() => setIsNavOpen(false)}>
+             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
         </div>
+        
         <nav className="drawer-body">
             <div className={`menu-group ${menuExpandido === 'CONTROL_INTERNO' ? 'expanded' : ''}`}>
                 <button className="menu-trigger" onClick={() => setMenuExpandido(menuExpandido === 'CONTROL_INTERNO' ? '' : 'CONTROL_INTERNO')}>
                     <span>Control Interno</span>
-                    <span className="menu-arrow">{menuExpandido === 'CONTROL_INTERNO' ? '−' : '+'}</span>
+                    <svg className="menu-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: menuExpandido === 'CONTROL_INTERNO' ? 'rotate(180deg)' : 'rotate(0deg)' }}><polyline points="6 9 12 15 18 9"></polyline></svg>
                 </button>
                 {menuExpandido === 'CONTROL_INTERNO' && (
                     <div className="menu-content">
@@ -128,7 +147,7 @@ function App() {
             <div className={`menu-group ${menuExpandido === 'CUENTAS_MEDICAS' ? 'expanded' : ''}`}>
                 <button className="menu-trigger" onClick={() => setMenuExpandido(menuExpandido === 'CUENTAS_MEDICAS' ? '' : 'CUENTAS_MEDICAS')}>
                     <span>Cuentas Médicas</span>
-                    <span className="menu-arrow">{menuExpandido === 'CUENTAS_MEDICAS' ? '−' : '+'}</span>
+                    <svg className="menu-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: menuExpandido === 'CUENTAS_MEDICAS' ? 'rotate(180deg)' : 'rotate(0deg)' }}><polyline points="6 9 12 15 18 9"></polyline></svg>
                 </button>
                 {menuExpandido === 'CUENTAS_MEDICAS' && (
                     <div className="menu-content">
@@ -140,11 +159,13 @@ function App() {
         </nav>
       </aside>
 
-      {/* DRAWER FILTROS */}
+      {/* DRAWER DERECHO: FILTROS AVANZADOS */}
       <aside className={`drawer right-drawer ${isFilterOpen ? 'open' : ''}`}>
         <div className="drawer-header">
           <span className="drawer-title">FILTROS AVANZADOS</span>
-          <button className="icon-btn" onClick={() => setIsFilterOpen(false)}>✕</button>
+          <button className="icon-btn no-border" onClick={() => setIsFilterOpen(false)}>
+             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
         </div>
         <div className="drawer-body">
             <div className="filter-item">
@@ -172,11 +193,11 @@ function App() {
       {/* CONTENIDO PRINCIPAL */}
       <main className="main-content">
         
-        {/* HEADER LIMPIO (Sin Input de Búsqueda) */}
         <header className="app-header">
             <div className="header-left">
+                {/* ICONO DE HAMBURGUESA PARA MENÚ */}
                 <button onClick={() => setIsNavOpen(true)} className="icon-btn border-btn">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
                 </button>
                 <div className="title-area">
                     <span className="path">{menuExpandido.replace('_', ' ')}</span>
@@ -185,9 +206,10 @@ function App() {
             </div>
 
             <div className="header-right">
-                {/* BOTÓN DE FILTROS AHORA PROTAGONISTA */}
+                
+                {/* ICONO DE EMBUDO PARA FILTROS */}
                 <button onClick={() => setIsFilterOpen(true)} className={`icon-btn border-btn ${Object.values(colFilters).some(v => v !== '') ? 'active-filter' : ''}`} title="Filtrar columnas">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
                 </button>
 
                 <div className="dropdown-container">
@@ -213,20 +235,17 @@ function App() {
             </div>
         </header>
 
-        {/* CONTENEDOR DE LA TABLA (OPTIMIZADA PARA MUCHAS COLUMNAS) */}
         <div className="content-wrapper">
           
           <div className="table-container">
             <table className="custom-table">
               <thead>
                 <tr>
-                  {/* COLUMNA INMOVILIZADA (Sticky) */}
                   <th className="sticky-col" style={{ minWidth: '160px' }}>DOCUMENTO</th>
                   <th style={{ minWidth: '120px' }}>FECHA</th>
                   <th style={{ minWidth: '160px' }}>SERVICIO</th>
                   <th style={{ minWidth: '400px' }}>REGISTRO CLÍNICO</th>
                   <th style={{ minWidth: '150px' }}>ID PROF.</th>
-                  {/* Añade más minWidths aquí si necesitas 20 columnas */}
                   <th style={{ minWidth: '250px' }}>UBICACIÓN GPS</th>
                 </tr>
               </thead>
@@ -238,7 +257,6 @@ function App() {
                 ) : (
                   paginatedData.map((row, index) => (
                     <tr key={index}>
-                      {/* CELDA INMOVILIZADA */}
                       <td className="sticky-col cell-copy font-mono font-medium" onClick={() => copyToClipboard(row.CC_PACIENTE)}>
                         {row.CC_PACIENTE}
                       </td>
@@ -254,7 +272,6 @@ function App() {
             </table>
           </div>
 
-          {/* CONTROLES INFERIORES */}
           <div className="bottom-toolbar">
              <div className="status-text">
                  Mostrando {paginatedData.length} de {filteredData.length} registros
@@ -283,10 +300,8 @@ function App() {
         </div>
       </main>
 
-      {/* CSS AJUSTADO PARA MULTI-COLUMNA Y ESTÉTICA LIMPIA */}
       <style>{`
-        * { box-sizing: border-box; }
-        body { margin: 0; font-family: 'Inter', -apple-system, sans-serif; background-color: #ffffff; color: #334155; }
+        body { margin: 0; font-family: 'Poppins', sans-serif; background-color: #ffffff; color: #334155; }
         
         .layout-container { display: flex; height: 100vh; overflow: hidden; position: relative; }
         .main-content { flex: 1; display: flex; flex-direction: column; width: 100%; }
@@ -300,7 +315,14 @@ function App() {
         .right-drawer { right: 0; transform: translateX(100%); border-left: 1px solid #e2e8f0; }
         .right-drawer.open { transform: translateX(0); }
 
+        /* HEADER DEL MENU (CON LOGO) */
         .drawer-header { padding: 20px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
+        .brand-container { display: flex; align-items: center; gap: 10px; }
+        .brand-logo { height: 32px; width: auto; object-fit: contain; }
+        .brand-text { display: flex; flex-direction: column; }
+        .brand-title { font-size: 15px; font-weight: 700; color: #0f172a; margin: 0; letter-spacing: -0.5px; }
+        .brand-subtitle { font-size: 10px; color: #64748b; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+
         .drawer-title { font-size: 11px; font-weight: 700; color: #64748b; letter-spacing: 0.05em; }
         .drawer-body { padding: 16px; flex: 1; overflow-y: auto; }
         .drawer-footer { padding: 16px; border-top: 1px solid #f1f5f9; }
@@ -311,21 +333,23 @@ function App() {
         .path { font-size: 10px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
         .current-page { font-size: 16px; font-weight: 600; color: #0f172a; margin: 0; }
 
-        .icon-btn { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid transparent; border-radius: 6px; color: #64748b; cursor: pointer; transition: 0.15s; }
+        /* ICONOS SVG */
+        .icon-btn { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid transparent; border-radius: 6px; color: #475569; cursor: pointer; transition: 0.15s; }
         .icon-btn:hover { background: #f1f5f9; color: #0f172a; }
         .border-btn { border: 1px solid #e2e8f0; }
+        .no-border { border: none; }
         .active-filter { background: #eff6ff; border-color: #3b82f6; color: #3b82f6; }
 
-        .btn-primary { background: #0f172a; color: #ffffff; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: 0.2s; }
+        .btn-primary { background: #0f172a; color: #ffffff; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: 0.2s; font-family: 'Poppins', sans-serif; }
         .btn-primary:hover { background: #1e293b; }
-        .btn-outline-full { width: 100%; background: transparent; border: 1px solid #cbd5e1; color: #475569; padding: 8px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; }
+        .btn-outline-full { width: 100%; background: transparent; border: 1px solid #cbd5e1; color: #475569; padding: 8px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; font-family: 'Poppins', sans-serif; }
 
         /* =========================================
            TABLA SCROLL HORIZONTAL MULTI-COLUMNA 
            ========================================= */
         .table-container { 
             flex: 1; 
-            overflow: auto; /* Permite scroll vertical y horizontal */
+            overflow: auto; 
             border: 1px solid #e2e8f0; 
             border-radius: 8px 8px 0 0; 
             border-bottom: none; 
@@ -334,13 +358,12 @@ function App() {
         
         .custom-table { 
             width: 100%; 
-            min-width: 1200px; /* Fuerza el scroll si hay muchas columnas */
+            min-width: 1200px; 
             border-collapse: separate; 
             border-spacing: 0; 
             text-align: left; 
         }
 
-        /* HEADER PEGADIZO ARRIBA */
         .custom-table thead th { 
             position: sticky; 
             top: 0; 
@@ -354,25 +377,22 @@ function App() {
             z-index: 10; 
         }
 
-        /* COLUMNA FIJA A LA IZQUIERDA (DOCUMENTO) */
         .sticky-col {
             position: sticky;
             left: 0;
             background-color: #ffffff;
             z-index: 5;
-            box-shadow: inset -1px 0 0 #e2e8f0; /* Falso borde derecho suave */
+            box-shadow: inset -1px 0 0 #e2e8f0; 
         }
         
-        /* Intersección de fila principal y columna principal */
         .custom-table thead th.sticky-col {
-            z-index: 20; /* Sobre el header y sobre la columna */
+            z-index: 20; 
             background-color: #f8fafc;
         }
 
         .custom-table tbody tr { background-color: #ffffff; transition: 0.15s; }
         .custom-table tbody td { padding: 12px 16px; font-size: 13px; color: #334155; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
         
-        /* Hover de la fila y la columna sticky al mismo tiempo */
         .custom-table tbody tr:hover, 
         .custom-table tbody tr:hover .sticky-col { 
             background-color: #f8fafc; 
@@ -392,10 +412,10 @@ function App() {
         .pagination-wrapper { display: flex; align-items: center; gap: 24px; }
         .view-controls { display: flex; align-items: center; gap: 8px; }
         .view-label { font-size: 12px; color: #64748b; }
-        .select-page { padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 12px; color: #0f172a; outline: none; background: #ffffff; cursor: pointer; }
+        .select-page { padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 12px; color: #0f172a; outline: none; background: #ffffff; cursor: pointer; font-family: 'Poppins', sans-serif; }
         
         .page-nav { display: flex; align-items: center; gap: 12px; }
-        .page-btn { background: transparent; border: 1px solid #e2e8f0; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 500; color: #0f172a; cursor: pointer; transition: 0.15s; }
+        .page-btn { background: transparent; border: 1px solid #e2e8f0; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 500; color: #0f172a; cursor: pointer; transition: 0.15s; font-family: 'Poppins', sans-serif; }
         .page-btn:hover:not(:disabled) { background: #f1f5f9; }
         .page-btn:disabled { color: #94a3b8; cursor: not-allowed; border-color: #f1f5f9; }
         .page-info { font-size: 12px; color: #475569; font-weight: 500; }
@@ -406,7 +426,7 @@ function App() {
         .dropdown-container { position: relative; }
         .dropdown-menu { position: absolute; top: calc(100% + 4px); right: 0; width: 180px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); padding: 6px; z-index: 50; }
         .dropdown-label { display: block; font-size: 10px; font-weight: 600; color: #94a3b8; padding: 4px 8px; margin-bottom: 2px; }
-        .dropdown-option { position: relative; display: block; width: 100%; text-align: left; padding: 8px; background: transparent; border: none; border-radius: 4px; font-size: 13px; color: #334155; cursor: pointer; }
+        .dropdown-option { position: relative; display: block; width: 100%; text-align: left; padding: 8px; background: transparent; border: none; border-radius: 4px; font-size: 13px; color: #334155; cursor: pointer; font-family: 'Poppins', sans-serif; }
         .dropdown-option:hover { background: #f1f5f9; }
         .text-danger { color: #dc2626; }
         .text-danger:hover { background: #fef2f2; color: #b91c1c; }
@@ -414,17 +434,17 @@ function App() {
         .hidden-file { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 
         .menu-group { margin-bottom: 4px; }
-        .menu-trigger { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: transparent; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; color: #334155; }
+        .menu-trigger { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: transparent; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; color: #334155; font-family: 'Poppins', sans-serif; transition: 0.2s; }
         .menu-trigger:hover { background: #f8fafc; }
-        .menu-arrow { color: #94a3b8; }
+        .menu-arrow { color: #94a3b8; transition: transform 0.2s; }
         .menu-content { display: flex; flex-direction: column; gap: 2px; padding-left: 12px; margin-top: 2px; }
-        .menu-item { text-align: left; padding: 8px 12px; border-radius: 6px; border: none; background: transparent; color: #64748b; font-size: 13px; cursor: pointer; }
-        .menu-item:hover { color: #0f172a; }
+        .menu-item { text-align: left; padding: 8px 12px; border-radius: 6px; border: none; background: transparent; color: #64748b; font-size: 13px; cursor: pointer; font-family: 'Poppins', sans-serif; transition: 0.15s; }
+        .menu-item:hover { color: #0f172a; background: #f1f5f9; }
         .menu-item.active { background: #f1f5f9; color: #0f172a; font-weight: 500; }
         
         .filter-item { margin-bottom: 16px; }
         .filter-item label { display: block; font-size: 11px; font-weight: 500; color: #64748b; margin-bottom: 6px; }
-        .filter-item input { width: 100%; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; outline: none; }
+        .filter-item input { width: 100%; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; font-family: 'Poppins', sans-serif; outline: none; transition: 0.15s; }
         .filter-item input:focus { border-color: #0f172a; }
       `}</style>
     </div>

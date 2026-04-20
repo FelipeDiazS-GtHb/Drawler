@@ -2,7 +2,6 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 
-// Importar Poppins desde Google Fonts
 const globalStyles = `
   @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
 
@@ -12,7 +11,6 @@ const globalStyles = `
     padding: 0;
   }
   body {
-    /* Cambio a Poppins como fuente principal */
     font-family: 'Poppins', -apple-system, sans-serif; 
     background-color: #ffffff;
     color: #334155;
