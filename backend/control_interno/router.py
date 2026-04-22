@@ -1,26 +1,26 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from sqlalchemy import create_engine, text
-import pandas as pd
-import io
-import re
-import traceback
-from oauth2client.service_account import ServiceAccountCredentials
-import requests
+import os
 import json
 import urllib.parse
-import os
+import requests
 from dotenv import load_dotenv
+from oauth2client.service_account import ServiceAccountCredentials
+import pandas as pd
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from sqlalchemy import create_engine, text
+import io
+import traceback
 
 load_dotenv()
+
 router = APIRouter()
 engine = create_engine("sqlite:///./prototipo.db")
 
-# CABECERAS EXACTAS DE TU SCRIPT
+# CABECERAS EXACTAS
 HEADERS_ESTANDAR = ["CC PROFESIONAL", "SERVICIO", "FECHA", "CC PACIENTE", "TURNO", "FECHA CREACION", "LIDER", "COORDINADOR", "GEOREFERENCIA", "ESTADO", "CRUCE"]
 HEADERS_INVASIVOS = ["CC PROFESIONAL", "FECHA", "CC PACIENTE", "JORNADA", "FECHA CREACION", "LIDER", "COORDINADOR", "GEOREFERENCIA", "ESTADO"]
 HEADERS_RUTERO = ["FECHA", "DOCUMENTO PROFESIONAL", "PROFESIONAL", "ASUNTO", "DOCUMENTO PACIENTE", "PACIENTE", "TIPO", "ESTADO"]
 
-# HOMOLOGACIÓN EXACTA DE TU SCRIPT
+# HOMOLOGACIÓN
 HOMOLOGACION_TIPO = {
     "CUIDADOR 10 HORAS": "CUIDADOR 10 HORAS",
     "CUIDADOR 12 HORAS DÃ\x8dA": "CUIDADOR 12 HORAS DÍA",
@@ -52,89 +52,113 @@ HOMOLOGACION_TIPO = {
     "VIDEOCONSULTA": "VIDEOCONSULTA"
 }
 
-
+# =====================================================================
+# FUNCIÓN BIGQUERY PARA GOOGLE SHEETS
+# =====================================================================
 def aplicar_cruce_bigquery_sheets(df_target):
     """
-    Realiza una consulta tipo BigQuery directamente a Google Sheets.
-    Busca el documento del PACIENTE en la Columna A y trae C (Líder) y D (Coordinador).
+    Optimización de cuota: Busca pacientes únicos, agrupa consultas y 
+    utiliza la API de visualización para ahorrar límites de lectura.
     """
-    # 1. Obtener configuraciones del .env
-    sheet_id = os.getenv("SHEET_ID_MAESTRO")
+    sheet_id = os.getenv("SHEET_ID_MAESTRO", "1xo5EzCA0tla56ENzeiuoHZd-mJ5v1R813zmyNTFkEqE")
     sheet_name = os.getenv("SHEET_NAME_COORDINADORES", "COORDINADORES")
-    
+
     if not sheet_id:
-        print("  [!] Error: SHEET_ID_MAESTRO no definido en el .env")
+        print(" [!] Aviso: SHEET_ID_MAESTRO no configurado en .env. Se omite el cruce.")
         return df_target
 
-    # 2. Extraer Cédulas ÚNICAS de PACIENTES para la búsqueda (Ignorar vacíos)
-    df_target['CC PACIENTE'] = df_target['CC PACIENTE'].astype(str).str.strip()
-    cedulas = [c for c in df_target['CC PACIENTE'].unique().tolist() if c]
+    # 1. LIMPIEZA DE .0 Y EXTRACCIÓN DE CÉDULAS
+    df_target['CC PACIENTE'] = df_target['CC PACIENTE'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    cedulas_unicas = [c for c in df_target['CC PACIENTE'].unique().tolist() if c and c.lower() != 'nan' and len(c) > 3]
     
-    if not cedulas: 
-        print("  [-] No hay CC PACIENTE válidos para buscar.")
+    if not cedulas_unicas: 
         return df_target
         
     try:
-        # 3. Autenticación con Cuenta de Servicio (credentials.json)
+        print(f"Consultando {len(cedulas_unicas)} pacientes únicos en Sheets (Hoja: {sheet_name})...")
+        
+        # 2. Autenticación con Cuenta de Servicio
         scope = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
         access_token = creds.get_access_token().access_token
         headers = {"Authorization": f"Bearer {access_token}"}
         
-        # 4. Construir la consulta SQL para Google Sheets (GViz API)
-        # Búsqueda en Col A (Paciente), extracción de Col C (Líder) y Col D (Coordinador)
-        condiciones = " OR ".join([f"A='{c}'" for c in cedulas])
-        sql_query = f"SELECT A, C, D WHERE {condiciones}"
+        # 3. PROCESAMIENTO POR LOTES (Para no romper la URL)
+        chunk_size = 30 
+        resultados_maestro = []
         
-        url = (
-            f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?"
-            f"tq={urllib.parse.quote(sql_query)}&sheet={urllib.parse.quote(sheet_name)}"
-        )
-        
-        res = requests.get(url, headers=headers)
-        
-        if res.status_code != 200:
-            print(f"  [X] Error de conexión con Google: {res.status_code}")
+        for i in range(0, len(cedulas_unicas), chunk_size):
+            lote = cedulas_unicas[i:i+chunk_size]
+            
+            # ====================================================================
+            # LA MAGIA PARA QUE NO FALLE EL CRUCE:
+            # Buscamos en Sheets como Texto Y como Número (A='123' OR A=123)
+            # ====================================================================
+            condiciones_lista = []
+            for c in lote:
+                if c.isdigit():
+                    condiciones_lista.append(f"(A='{c}' OR A={c})")
+                else:
+                    condiciones_lista.append(f"A='{c}'")
+                    
+            condiciones = " OR ".join(condiciones_lista)
+            sql_query = f"SELECT A, C, D WHERE {condiciones}"
+            
+            url = (
+                f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?"
+                f"tq={urllib.parse.quote(sql_query)}&sheet={urllib.parse.quote(sheet_name)}"
+            )
+            
+            res = requests.get(url, headers=headers)
+            if res.status_code != 200: 
+                print(f"  [X] Error HTTP {res.status_code} en lote.")
+                continue
+            
+            # Procesar respuesta
+            text_resp = res.text
+            json_str = text_resp[text_resp.find('{'):text_resp.rfind('}')+1]
+            data = json.loads(json_str)
+            
+            if 'rows' in data['table']:
+                for row in data['table']['rows']:
+                    c_list = row.get('c', [])
+                    
+                    # EXTRACCIÓN SEGURA (Evita IndexError si la celda está vacía)
+                    doc = str(c_list[0]['v']) if len(c_list) > 0 and c_list[0] and c_list[0].get('v') is not None else ''
+                    lider = str(c_list[1]['v']) if len(c_list) > 1 and c_list[1] and c_list[1].get('v') is not None else ''
+                    coord = str(c_list[2]['v']) if len(c_list) > 2 and c_list[2] and c_list[2].get('v') is not None else ''
+                    
+                    resultados_maestro.append([doc, lider, coord])
+
+        if not resultados_maestro:
+            print("  [-] La consulta se envió correctamente, pero Sheets devolvió 0 coincidencias.")
             return df_target
 
-        # 5. Procesar respuesta JSON de Google
-        text_resp = res.text
-        json_str = text_resp[text_resp.find('{'):text_resp.rfind('}')+1]
-        data = json.loads(json_str)
+        # 4. CRUCE FINAL EN MEMORIA (Pandas)
+        df_bq = pd.DataFrame(resultados_maestro, columns=['DocPac_M', 'LIDER_M', 'COORD_M'])
+        # Limpiar el documento maestro de cualquier '.0' que haya regresado Google
+        df_bq['DocPac_M'] = df_bq['DocPac_M'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         
-        filas = []
-        if 'rows' in data['table']:
-            for row in data['table']['rows']:
-                celdas = [val['v'] if val else '' for val in row['c']]
-                filas.append(celdas)
-                
-        # 6. Convertir resultados a DataFrame
-        df_bq = pd.DataFrame(filas, columns=['DocumentoPaciente', 'Lider', 'Coordinador'])
-        df_bq['DocumentoPaciente'] = df_bq['DocumentoPaciente'].astype(str).str.replace(".0", "", regex=False).str.strip()
+        df_merged = pd.merge(df_target, df_bq, left_on='CC PACIENTE', right_on='DocPac_M', how='left')
         
-        # 7. Unir con los datos locales (LEFT JOIN) cruzando PACIENTE con PACIENTE
-        df_merged = pd.merge(
-            df_target, df_bq, 
-            left_on='CC PACIENTE', right_on='DocumentoPaciente', how='left'
-        )
-        
-        # 8. Asignar a las columnas de destino
-        df_target['LIDER'] = df_merged['Lider'].fillna('')
-        df_target['COORDINADOR'] = df_merged['Coordinador'].fillna('')
+        # Asignar los valores a la tabla
+        df_target['LIDER'] = df_merged['LIDER_M'].fillna('')
+        df_target['COORDINADOR'] = df_merged['COORD_M'].fillna('')
         
         if 'CRUCE' in df_target.columns:
             df_target['CRUCE'] = df_target['LIDER'].apply(lambda x: "CRUCE OK" if x != "" else "SIN DATOS EN MAESTRO")
             
-        print(f"  ✓ Query exitosa: Se encontraron {len(df_bq)} pacientes en la hoja '{sheet_name}'.")
+        print(f"  ✓ Query exitosa: Se trajeron datos de {len(df_bq)} pacientes.")
         
     except Exception as e:
-        print(f"  [X] Fallo en el cruce de datos: {str(e)}")
+        print(f"  [X] Fallo inesperado en el cruce de datos: {str(e)}")
         
     return df_target
-# =====================================================================
-# FUNCIONES NATIVAS DE procesar_datos.py ADAPTADAS A BYTES
-# =====================================================================
 
+
+# =====================================================================
+# FUNCIONES DE PROCESAMIENTO
+# =====================================================================
 def proc_ventilados(df_raw):
     df_target = pd.DataFrame(index=df_raw.index, columns=HEADERS_ESTANDAR)
     df_target["SERVICIO"] = "VENTILADO"
@@ -254,24 +278,21 @@ def proc_rutero(df_raw):
 async def upload_file(seccion: str, tipo: str, file: UploadFile = File(...)):
     try:
         content = await file.read()
+        # Detección de separadores dinámicos
         df_raw = None
-        
-        # Intentar múltiples codificaciones de forma segura
-        for enc in ['utf-8-sig', 'latin-1', 'cp1252', 'utf-8']:
+        for enc in ['utf-8-sig', 'latin-1', 'cp1252']:
             for sep in [';', ',']:
                 try:
                     temp_df = pd.read_csv(io.BytesIO(content), sep=sep, encoding=enc, dtype=str, on_bad_lines='skip')
                     if len(temp_df.columns) > 5:
                         df_raw = temp_df
                         break
-                except Exception:
-                    continue
+                except: continue
             if df_raw is not None: break
                 
-        if df_raw is None or df_raw.empty:
-            raise ValueError("El archivo está vacío o el formato es irreconocible.")
+        if df_raw is None: raise ValueError("Formato de CSV no reconocido.")
 
-        # Ejecutar las funciones exactas de tu script original
+        # Lógica de procesamiento original
         if tipo == "ventilados": df_clean = proc_ventilados(df_raw)
         elif tipo == "enfermeria": df_clean = proc_enfermeria(df_raw)
         elif tipo == "actividades": df_clean = proc_actividades(df_raw)
@@ -279,14 +300,16 @@ async def upload_file(seccion: str, tipo: str, file: UploadFile = File(...)):
         elif tipo == "rutero": df_clean = proc_rutero(df_raw)
         else: raise ValueError(f"Tipo {tipo} no soportado")
 
-        # Guardar en tablas separadas para respetar el # de columnas de cada Excel
+        # EJECUTAR CRUCE OPTIMIZADO PARA NOTAS EYC
+        if tipo in ["ventilados", "enfermeria", "actividades"]:
+            df_clean = aplicar_cruce_bigquery_sheets(df_clean)
+
         table_name = seccion.lower().replace(" ", "_")
-        
         df_clean.to_sql(table_name, con=engine, if_exists='append', index=False)
-        return {"status": "ok", "filas_procesadas": len(df_clean)}
+        return {"status": "ok"}
         
     except Exception as e:
-        print(f"ERROR EN BACKEND: {traceback.format_exc()}")
+        print(f"ERROR: {traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/data/{seccion}")
