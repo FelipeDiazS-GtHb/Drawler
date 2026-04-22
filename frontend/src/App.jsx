@@ -15,7 +15,7 @@ function App() {
 
   const [pageSize, setPageSize] = useState(50);
   const [currentPage, setCurrentPage] = useState(1);
-  const [colFilters, setColFilters] = useState({ CC_PACIENTE: '', CC_PROFESIONAL: '', SERVICIO: '', FECHA: '' });
+  const [colFilters, setColFilters] = useState({});
   
   const [toast, setToast] = useState(null);
 
@@ -30,6 +30,7 @@ function App() {
   useEffect(() => { 
     cargarDatos(); 
     setShowActions(false);
+    setColFilters({}); // Reiniciar filtros al cambiar de sección
   }, [seccion]);
 
   const filteredData = useMemo(() => {
@@ -56,11 +57,10 @@ function App() {
   };
 
   const clearFilters = () => {
-    setColFilters({ CC_PACIENTE: '', CC_PROFESIONAL: '', SERVICIO: '', FECHA: '' });
+    setColFilters({});
     setCurrentPage(1);
   };
 
-  // --- CARGUE ROBUSTO CON MANEJO DE ERRORES ---
   const handleFileUpload = async (tipo, e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -68,22 +68,14 @@ function App() {
     setShowActions(false);
     const fd = new FormData();
     fd.append("file", file);
-    
     try {
         const res = await fetch(`${API}/upload/${seccion}/${tipo}`, { method: "POST", body: fd });
-        if (!res.ok) {
-            const errorData = await res.json();
-            throw new Error(errorData.detail || "Error interno del servidor");
-        }
+        if (!res.ok) throw new Error("Error en servidor");
         await cargarDatos();
-        setToast(`✅ Archivo cargado correctamente.`);
+        setToast(`✅ Archivo ${tipo} cargado.`);
         setTimeout(() => setToast(null), 3000);
-    } catch (err) { 
-        alert(`❌ Error al subir el archivo:\n${err.message}`); 
-    } finally {
-        setIsLoading(false);
-        e.target.value = null; // Reiniciar el input siempre
-    }
+    } catch (err) { alert("Error al subir archivo"); }
+    finally { e.target.value = null; setIsLoading(false); }
   };
 
   const getActionOptions = () => {
@@ -107,6 +99,54 @@ function App() {
       setIsNavOpen(false); 
   };
 
+  // =====================================================================
+  // ESTRUCTURA DINÁMICA DE COLUMNAS EXACTAS AL EXCEL
+  // =====================================================================
+  const columnsConfig = {
+      'NOTAS EYC': [
+          { field: 'CC PROFESIONAL', width: '150px', mono: true, pinned: true },
+          { field: 'SERVICIO', width: '150px' },
+          { field: 'FECHA', width: '120px' },
+          { field: 'CC PACIENTE', width: '150px', mono: true },
+          { field: 'TURNO', width: '400px', wrap: true },
+          { field: 'FECHA CREACION', width: '160px' },
+          { field: 'LIDER', width: '120px' },
+          { field: 'COORDINADOR', width: '120px' },
+          { field: 'GEOREFERENCIA', width: '250px' },
+          { field: 'ESTADO', width: '120px' },
+          { field: 'CRUCE', width: '120px' }
+      ],
+      'MEDIOS INVASIVOS': [
+          { field: 'CC PROFESIONAL', width: '150px', mono: true, pinned: true },
+          { field: 'FECHA', width: '120px' },
+          { field: 'CC PACIENTE', width: '150px', mono: true },
+          { field: 'JORNADA', width: '400px', wrap: true },
+          { field: 'FECHA CREACION', width: '160px' },
+          { field: 'LIDER', width: '120px' },
+          { field: 'COORDINADOR', width: '120px' },
+          { field: 'GEOREFERENCIA', width: '250px' },
+          { field: 'ESTADO', width: '120px' }
+      ],
+      'RUTERO': [
+          { field: 'FECHA', width: '120px', pinned: true },
+          { field: 'DOCUMENTO PROFESIONAL', width: '180px', mono: true },
+          { field: 'PROFESIONAL', width: '250px' },
+          { field: 'ASUNTO', width: '350px', wrap: true },
+          { field: 'DOCUMENTO PACIENTE', width: '180px', mono: true },
+          { field: 'PACIENTE', width: '250px' },
+          { field: 'TIPO', width: '200px' },
+          { field: 'ESTADO', width: '120px' }
+      ]
+  };
+
+  const activeColumns = columnsConfig[seccion] || [];
+
+  // Mapeo dinámico de filtros según sección
+  const isRutero = seccion === 'RUTERO';
+  const docPacField = isRutero ? 'DOCUMENTO PACIENTE' : 'CC PACIENTE';
+  const docProfField = isRutero ? 'DOCUMENTO PROFESIONAL' : 'CC PROFESIONAL';
+  const servField = isRutero ? 'TIPO' : 'SERVICIO';
+
   return (
     <div className="layout-container">
       
@@ -114,7 +154,7 @@ function App() {
 
       <div className={`backdrop ${isNavOpen || isFilterOpen ? 'open' : ''}`} onClick={() => { setIsNavOpen(false); setIsFilterOpen(false); }}></div>
 
-      {/* DRAWER IZQUIERDO: NAVEGACIÓN Y LOGO */}
+      {/* DRAWER NAVEGACIÓN Y LOGO */}
       <aside className={`drawer left-drawer ${isNavOpen ? 'open' : ''}`}>
         <div className="drawer-header">
           <div className="brand-container">
@@ -159,7 +199,7 @@ function App() {
         </nav>
       </aside>
 
-      {/* DRAWER DERECHO: FILTROS AVANZADOS */}
+      {/* DRAWER DERECHO FILTROS DINÁMICOS */}
       <aside className={`drawer right-drawer ${isFilterOpen ? 'open' : ''}`}>
         <div className="drawer-header">
           <span className="drawer-title">FILTROS AVANZADOS</span>
@@ -170,19 +210,19 @@ function App() {
         <div className="drawer-body">
             <div className="filter-item">
                 <label>Documento Paciente</label>
-                <input type="text" value={colFilters.CC_PACIENTE} onChange={(e) => handleFilterChange('CC_PACIENTE', e.target.value)} />
+                <input type="text" value={colFilters[docPacField] || ''} onChange={(e) => handleFilterChange(docPacField, e.target.value)} />
             </div>
             <div className="filter-item">
-                <label>ID Profesional</label>
-                <input type="text" value={colFilters.CC_PROFESIONAL} onChange={(e) => handleFilterChange('CC_PROFESIONAL', e.target.value)} />
+                <label>Documento Profesional</label>
+                <input type="text" value={colFilters[docProfField] || ''} onChange={(e) => handleFilterChange(docProfField, e.target.value)} />
             </div>
             <div className="filter-item">
                 <label>Fecha Específica</label>
-                <input type="text" value={colFilters.FECHA} onChange={(e) => handleFilterChange('FECHA', e.target.value)} />
+                <input type="text" value={colFilters['FECHA'] || ''} onChange={(e) => handleFilterChange('FECHA', e.target.value)} />
             </div>
             <div className="filter-item">
-                <label>Servicio</label>
-                <input type="text" value={colFilters.SERVICIO} onChange={(e) => handleFilterChange('SERVICIO', e.target.value)} />
+                <label>Servicio / Tipo</label>
+                <input type="text" value={colFilters[servField] || ''} onChange={(e) => handleFilterChange(servField, e.target.value)} />
             </div>
         </div>
         <div className="drawer-footer">
@@ -195,7 +235,6 @@ function App() {
         
         <header className="app-header">
             <div className="header-left">
-                {/* ICONO DE HAMBURGUESA PARA MENÚ */}
                 <button onClick={() => setIsNavOpen(true)} className="icon-btn border-btn">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
                 </button>
@@ -207,8 +246,7 @@ function App() {
 
             <div className="header-right">
                 
-                {/* ICONO DE EMBUDO PARA FILTROS */}
-                <button onClick={() => setIsFilterOpen(true)} className={`icon-btn border-btn ${Object.values(colFilters).some(v => v !== '') ? 'active-filter' : ''}`} title="Filtrar columnas">
+                <button onClick={() => setIsFilterOpen(true)} className={`icon-btn border-btn ${Object.values(colFilters).some(v => v !== '') ? 'active-filter' : ''}`} title="Filtros">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
                 </button>
 
@@ -226,7 +264,7 @@ function App() {
                                 </div>
                             ))}
                             <div className="dropdown-divider"></div>
-                            <button onClick={async () => { if(confirm(`¿Purgar sección?`)) { await fetch(`${API}/clear/${seccion}`, {method:'DELETE'}); cargarDatos(); setShowActions(false); } }} className="dropdown-option text-danger">
+                            <button onClick={async () => { if(confirm(`¿Purgar sección ${seccion}?`)) { await fetch(`${API}/clear/${seccion}`, {method:'DELETE'}); cargarDatos(); setShowActions(false); } }} className="dropdown-option text-danger">
                                 Purgar Datos
                             </button>
                         </div>
@@ -235,36 +273,41 @@ function App() {
             </div>
         </header>
 
+        {/* TABLA DINÁMICA: CONSTRUYE LAS COLUMNAS EXACTAS SEGÚN EL EXCEL */}
         <div className="content-wrapper">
-          
           <div className="table-container">
             <table className="custom-table">
               <thead>
                 <tr>
-                  <th className="sticky-col" style={{ minWidth: '160px' }}>DOCUMENTO</th>
-                  <th style={{ minWidth: '120px' }}>FECHA</th>
-                  <th style={{ minWidth: '160px' }}>SERVICIO</th>
-                  <th style={{ minWidth: '400px' }}>REGISTRO CLÍNICO</th>
-                  <th style={{ minWidth: '150px' }}>ID PROF.</th>
-                  <th style={{ minWidth: '250px' }}>UBICACIÓN GPS</th>
+                  {activeColumns.map((col, idx) => (
+                      <th key={idx} className={col.pinned ? 'sticky-col' : ''} style={{ minWidth: col.width }}>
+                          {col.field}
+                      </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {isLoading ? (
-                  <tr><td colSpan="6" className="text-center">Sincronizando datos...</td></tr>
+                  <tr><td colSpan={activeColumns.length} className="text-center">Sincronizando datos...</td></tr>
                 ) : paginatedData.length === 0 ? (
-                  <tr><td colSpan="6" className="text-center">No hay registros que coincidan con los filtros.</td></tr>
+                  <tr><td colSpan={activeColumns.length} className="text-center">No hay registros que coincidan con los filtros.</td></tr>
                 ) : (
                   paginatedData.map((row, index) => (
                     <tr key={index}>
-                      <td className="sticky-col cell-copy font-mono font-medium" onClick={() => copyToClipboard(row.CC_PACIENTE)}>
-                        {row.CC_PACIENTE}
-                      </td>
-                      <td className="text-muted">{row.FECHA}</td>
-                      <td>{row.SERVICIO}</td>
-                      <td className="cell-wrap cell-copy" onClick={() => copyToClipboard(row.DETALLE)}>{row.TURNO || row.DETALLE}</td>
-                      <td className="cell-copy font-mono" onClick={() => copyToClipboard(row.CC_PROFESIONAL)}>{row.CC_PROFESIONAL}</td>
-                      <td className="text-muted text-sm">{row.GEOREFERENCIA}</td>
+                      {activeColumns.map((col, colIdx) => (
+                          <td 
+                              key={colIdx} 
+                              className={`
+                                  cell-copy 
+                                  ${col.pinned ? 'sticky-col font-medium' : ''} 
+                                  ${col.mono ? 'font-mono' : ''} 
+                                  ${col.wrap ? 'cell-wrap' : ''}
+                              `} 
+                              onClick={() => copyToClipboard(row[col.field])}
+                          >
+                              {row[col.field]}
+                          </td>
+                      ))}
                     </tr>
                   ))
                 )}
@@ -272,6 +315,7 @@ function App() {
             </table>
           </div>
 
+          {/* CONTROLES INFERIORES */}
           <div className="bottom-toolbar">
              <div className="status-text">
                  Mostrando {paginatedData.length} de {filteredData.length} registros
@@ -279,7 +323,7 @@ function App() {
              
              <div className="pagination-wrapper">
                  <div className="view-controls">
-                     <span className="view-label">Líneas por página:</span>
+                     <span className="view-label">Líneas:</span>
                      <select value={pageSize} onChange={(e) => { setPageSize(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value)); setCurrentPage(1); }} className="select-page">
                          <option value={50}>50</option>
                          <option value={200}>200</option>
@@ -289,14 +333,13 @@ function App() {
 
                  {pageSize !== 'ALL' && totalPages > 1 && (
                      <div className="page-nav">
-                         <button disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)} className="page-btn">Anterior</button>
+                         <button disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)} className="page-btn">Ant</button>
                          <span className="page-info">{currentPage} / {totalPages}</span>
-                         <button disabled={currentPage === totalPages} onClick={() => setCurrentPage(p => p + 1)} className="page-btn">Siguiente</button>
+                         <button disabled={currentPage === totalPages} onClick={() => setCurrentPage(p => p + 1)} className="page-btn">Sig</button>
                      </div>
                  )}
              </div>
           </div>
-
         </div>
       </main>
 
@@ -315,7 +358,7 @@ function App() {
         .right-drawer { right: 0; transform: translateX(100%); border-left: 1px solid #e2e8f0; }
         .right-drawer.open { transform: translateX(0); }
 
-        /* HEADER DEL MENU (CON LOGO) */
+        /* HEADER DEL MENU CON LOGO */
         .drawer-header { padding: 20px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
         .brand-container { display: flex; align-items: center; gap: 10px; }
         .brand-logo { height: 32px; width: auto; object-fit: contain; }
@@ -333,7 +376,6 @@ function App() {
         .path { font-size: 10px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
         .current-page { font-size: 16px; font-weight: 600; color: #0f172a; margin: 0; }
 
-        /* ICONOS SVG */
         .icon-btn { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid transparent; border-radius: 6px; color: #475569; cursor: pointer; transition: 0.15s; }
         .icon-btn:hover { background: #f1f5f9; color: #0f172a; }
         .border-btn { border: 1px solid #e2e8f0; }
@@ -345,7 +387,7 @@ function App() {
         .btn-outline-full { width: 100%; background: transparent; border: 1px solid #cbd5e1; color: #475569; padding: 8px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; font-family: 'Poppins', sans-serif; }
 
         /* =========================================
-           TABLA SCROLL HORIZONTAL MULTI-COLUMNA 
+           TABLA DINÁMICA NATIVA 
            ========================================= */
         .table-container { 
             flex: 1; 
@@ -358,7 +400,6 @@ function App() {
         
         .custom-table { 
             width: 100%; 
-            min-width: 1200px; 
             border-collapse: separate; 
             border-spacing: 0; 
             text-align: left; 
@@ -403,8 +444,6 @@ function App() {
         .cell-copy:hover { color: #3b82f6; }
         .font-mono { font-family: ui-monospace, Consolas, monospace; }
         .font-medium { font-weight: 500; color: #0f172a; }
-        .text-muted { color: #64748b; }
-        .text-sm { font-size: 12px; }
         .text-center { text-align: center; padding: 40px !important; color: #94a3b8; }
 
         .bottom-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 0 0 8px 8px; }
@@ -445,7 +484,7 @@ function App() {
         .filter-item { margin-bottom: 16px; }
         .filter-item label { display: block; font-size: 11px; font-weight: 500; color: #64748b; margin-bottom: 6px; }
         .filter-item input { width: 100%; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; font-family: 'Poppins', sans-serif; outline: none; transition: 0.15s; }
-        .filter-item input:focus { border-color: #0f172a; }
+        .filter-item input:focus { border-color: #0f172a; box-shadow: 0 0 0 2px #f1f5f9; }
       `}</style>
     </div>
   );

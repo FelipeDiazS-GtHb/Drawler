@@ -1,4 +1,7 @@
 venv/
-__pycache__
+__pycache__*/
 backend\prototipo.db
 files*/
+credentials.json
+prototipo.db*
+.env*

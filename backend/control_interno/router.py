@@ -4,67 +4,251 @@ import pandas as pd
 import io
 import re
 import traceback
+from oauth2client.service_account import ServiceAccountCredentials
+import requests
+import json
+import urllib.parse
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 router = APIRouter()
 engine = create_engine("sqlite:///./prototipo.db")
 
-def depurar_archivo(df_raw, tipo):
-    # AJUSTADO CON LOS ÍNDICES REALES DE PROCESAR_DATOS.PY
-    # Estructura de idx: [CC PROFESIONAL, FECHA, CC PACIENTE, REGISTRO/TURNO, UBI1, UBI2]
-    config = {
-        "ventilados":  {"lbl": "VENTILADO", "idx": [77, 1, 3, 21, 78, 79]},
-        "enfermeria":  {"lbl": "NOTA ENFERMERIA", "idx": [44, 1, 3, 21, 45, 46]},
-        "actividades": {"lbl": "CUIDADOR", "idx": [35, 1, 3, 14, 39, 40]}, # CORREGIDO UBI
-        "invasivos":   {"lbl": "MEDIOS INVASIVOS", "idx": [33, 1, 3, 14, 37, 38]}, # CORREGIDO UBI
-        "rutero":      {"lbl": "RUTERO", "idx": [13, 17, 1, 16, 10, None]}
-    }
-    
-    if tipo not in config: 
-        raise ValueError(f"Tipo de archivo '{tipo}' no soportado.")
-    m = config[tipo]
+# CABECERAS EXACTAS DE TU SCRIPT
+HEADERS_ESTANDAR = ["CC PROFESIONAL", "SERVICIO", "FECHA", "CC PACIENTE", "TURNO", "FECHA CREACION", "LIDER", "COORDINADOR", "GEOREFERENCIA", "ESTADO", "CRUCE"]
+HEADERS_INVASIVOS = ["CC PROFESIONAL", "FECHA", "CC PACIENTE", "JORNADA", "FECHA CREACION", "LIDER", "COORDINADOR", "GEOREFERENCIA", "ESTADO"]
+HEADERS_RUTERO = ["FECHA", "DOCUMENTO PROFESIONAL", "PROFESIONAL", "ASUNTO", "DOCUMENTO PACIENTE", "PACIENTE", "TIPO", "ESTADO"]
 
-    df_target = pd.DataFrame(index=df_raw.index, columns=range(11)).fillna("")
-    df_target[1] = m["lbl"]
-    
-    def extract_num(val):
-        if pd.isna(val) or str(val).strip() == "": return ""
-        res = re.search(r'(\d+)', str(val))
-        return res.group(1) if res else ""
+# HOMOLOGACIÓN EXACTA DE TU SCRIPT
+HOMOLOGACION_TIPO = {
+    "CUIDADOR 10 HORAS": "CUIDADOR 10 HORAS",
+    "CUIDADOR 12 HORAS DÃ\x8dA": "CUIDADOR 12 HORAS DÍA",
+    "CUIDADOR 12 HORAS DÍA": "CUIDADOR 12 HORAS DÍA",
+    "CUIDADOR 12 HORAS NOCHE": "CUIDADOR 12 HORAS NOCHE",
+    "CUIDADOR 6 HORAS": "CUIDADOR 6 HORAS",
+    "CUIDADOR 8 HORAS": "CUIDADOR 8 HORAS",
+    "CUIDADOR 9 HORAS": "CUIDADOR 9 HORAS",
+    "ENFERMERÃ\x8dA 12 HORAS DÃ\x8dA": "ENFERMERÍA 12 HORAS DÍA",
+    "ENFERMERÍA 12 HORAS DÍA": "ENFERMERÍA 12 HORAS DÍA",
+    "ENFERMERIA 12 HORAS NOCHE": "ENFERMERIA 12 HORAS NOCHE",
+    "ENFERMERÃ\x8dA 6 HORAS": "ENFERMERÍA 6 HORAS",
+    "ENFERMERÍA 6 HORAS": "ENFERMERÍA 6 HORAS",
+    "ENFERMERÃ\x8dA 8 HORAS": "ENFERMERÍA 8 HORAS",
+    "ENFERMERÍA 8 HORAS": "ENFERMERÍA 8 HORAS",
+    "ENTRENAMIENTO 12 HORAS DIA": "ENTRENAMIENTO 12 HORAS DIA",
+    "ENTRENAMIENTO 12 HORAS NOCHE": "ENTRENAMIENTO 12 HORAS NOCHE",
+    "ENTRENAMIENTO 8 HORAS": "ENTRENAMIENTO 8 HORAS",
+    "INYECCION O INFUSION DE MEDICAMENTOS": "INYECCION O INFUSION DE MEDICAMENTOS",
+    "MEDICINA GENERAL": "MEDICINA GENERAL",
+    "NUTRICION": "NUTRICION",
+    "PSICOLOGIA": "PSICOLOGIA",
+    "TERAPIA FISICA": "TERAPIA FISICA",
+    "TERAPIA FONOAUDIOLOGICA": "TERAPIA FONOAUDIOLOGICA",
+    "TERAPIA OCUPACIONAL": "TERAPIA OCUPACIONAL",
+    "TERAPIA RESPIRATORIA": "TERAPIA RESPIRATORIA",
+    "VALORACION TERAPIA FISICA": "VALORACION TERAPIA FISICA",
+    "VALORACION TERAPIA RESPIRATORIA": "VALORACION TERAPIA RESPIRATORIA",
+    "VIDEOCONSULTA": "VIDEOCONSULTA"
+}
 
-    def safe_extract(df, idx, apply_func=None, split_space=False):
-        if idx is None or idx >= len(df.columns):
-            return pd.Series([""] * len(df))
-        col = df.iloc[:, idx].astype(str).replace('nan', '')
-        if apply_func: col = col.apply(apply_func)
-        if split_space: col = col.str.split(" ").str[0]
-        return col
 
-    # Extracción de CC PACIENTE (Ahora con validación estricta)
-    # En tu script procesar_datos.py, el CC_PACIENTE siempre es el índice 3 para clínicas
-    # Pero el rutero usa el índice 1
-    df_target[3] = safe_extract(df_raw, m["idx"][2], apply_func=extract_num) # CC PACIENTE
+def aplicar_cruce_bigquery_sheets(df_target):
+    """
+    Realiza una consulta tipo BigQuery directamente a Google Sheets.
+    Busca el documento del PACIENTE en la Columna A y trae C (Líder) y D (Coordinador).
+    """
+    # 1. Obtener configuraciones del .env
+    sheet_id = os.getenv("SHEET_ID_MAESTRO")
+    sheet_name = os.getenv("SHEET_NAME_COORDINADORES", "COORDINADORES")
     
-    # Validar que si la longitud del "CC PACIENTE" es muy corta (ej: edad 40, 15), es porque las columnas se rodaron
-    # A veces los CSV exportan mal la estructura y se rueda una columna a la izquierda
-    mascara_erronea = df_target[3].str.len() <= 3
-    if mascara_erronea.any() and tipo != "rutero":
-        # Intentar extraer del índice 4 (si el 3 era la edad por el desfase)
-        posible_cc = safe_extract(df_raw, 4, apply_func=extract_num)
-        df_target.loc[mascara_erronea, 3] = posible_cc[mascara_erronea]
+    if not sheet_id:
+        print("  [!] Error: SHEET_ID_MAESTRO no definido en el .env")
+        return df_target
 
-    df_target[0] = safe_extract(df_raw, m["idx"][0], apply_func=extract_num) # CC PROF
-    df_target[2] = safe_extract(df_raw, m["idx"][1], split_space=True)       # FECHA
-    df_target[4] = safe_extract(df_raw, m["idx"][3])                         # TURNO
+    # 2. Extraer Cédulas ÚNICAS de PACIENTES para la búsqueda (Ignorar vacíos)
+    df_target['CC PACIENTE'] = df_target['CC PACIENTE'].astype(str).str.strip()
+    cedulas = [c for c in df_target['CC PACIENTE'].unique().tolist() if c]
     
-    ubi = safe_extract(df_raw, m["idx"][4])
-    prox = safe_extract(df_raw, m["idx"][5]) if m["idx"][5] is not None else pd.Series([""] * len(df_raw))
-    df_target[8] = (ubi + " | " + prox).str.strip(" | ")
+    if not cedulas: 
+        print("  [-] No hay CC PACIENTE válidos para buscar.")
+        return df_target
+        
+    try:
+        # 3. Autenticación con Cuenta de Servicio (credentials.json)
+        scope = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        access_token = creds.get_access_token().access_token
+        headers = {"Authorization": f"Bearer {access_token}"}
+        
+        # 4. Construir la consulta SQL para Google Sheets (GViz API)
+        # Búsqueda en Col A (Paciente), extracción de Col C (Líder) y Col D (Coordinador)
+        condiciones = " OR ".join([f"A='{c}'" for c in cedulas])
+        sql_query = f"SELECT A, C, D WHERE {condiciones}"
+        
+        url = (
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?"
+            f"tq={urllib.parse.quote(sql_query)}&sheet={urllib.parse.quote(sheet_name)}"
+        )
+        
+        res = requests.get(url, headers=headers)
+        
+        if res.status_code != 200:
+            print(f"  [X] Error de conexión con Google: {res.status_code}")
+            return df_target
 
-    df_final = df_target[[0, 1, 2, 3, 4, 8]].copy()
-    df_final.columns = ["CC_PROFESIONAL", "SERVICIO", "FECHA", "CC_PACIENTE", "TURNO", "GEOREFERENCIA"]
-    
-    # Limpiar registros donde el CC Paciente esté vacío
-    return df_final[df_final["CC_PACIENTE"] != ""]
+        # 5. Procesar respuesta JSON de Google
+        text_resp = res.text
+        json_str = text_resp[text_resp.find('{'):text_resp.rfind('}')+1]
+        data = json.loads(json_str)
+        
+        filas = []
+        if 'rows' in data['table']:
+            for row in data['table']['rows']:
+                celdas = [val['v'] if val else '' for val in row['c']]
+                filas.append(celdas)
+                
+        # 6. Convertir resultados a DataFrame
+        df_bq = pd.DataFrame(filas, columns=['DocumentoPaciente', 'Lider', 'Coordinador'])
+        df_bq['DocumentoPaciente'] = df_bq['DocumentoPaciente'].astype(str).str.replace(".0", "", regex=False).str.strip()
+        
+        # 7. Unir con los datos locales (LEFT JOIN) cruzando PACIENTE con PACIENTE
+        df_merged = pd.merge(
+            df_target, df_bq, 
+            left_on='CC PACIENTE', right_on='DocumentoPaciente', how='left'
+        )
+        
+        # 8. Asignar a las columnas de destino
+        df_target['LIDER'] = df_merged['Lider'].fillna('')
+        df_target['COORDINADOR'] = df_merged['Coordinador'].fillna('')
+        
+        if 'CRUCE' in df_target.columns:
+            df_target['CRUCE'] = df_target['LIDER'].apply(lambda x: "CRUCE OK" if x != "" else "SIN DATOS EN MAESTRO")
+            
+        print(f"  ✓ Query exitosa: Se encontraron {len(df_bq)} pacientes en la hoja '{sheet_name}'.")
+        
+    except Exception as e:
+        print(f"  [X] Fallo en el cruce de datos: {str(e)}")
+        
+    return df_target
+# =====================================================================
+# FUNCIONES NATIVAS DE procesar_datos.py ADAPTADAS A BYTES
+# =====================================================================
+
+def proc_ventilados(df_raw):
+    df_target = pd.DataFrame(index=df_raw.index, columns=HEADERS_ESTANDAR)
+    df_target["SERVICIO"] = "VENTILADO"
+    try: df_target["CC PROFESIONAL"] = df_raw.iloc[:, 77].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: 
+        fechas_dt = pd.to_datetime(df_raw.iloc[:, 1], errors='coerce')
+        df_target["FECHA"] = [l if pd.notna(l) and str(l) not in ('NaT', 'nan', '') else c for l, c in zip(fechas_dt.dt.strftime('%d/%m/%Y').tolist(), df_raw.iloc[:, 1].fillna("").astype(str).tolist())]
+    except Exception: pass
+    try: df_target["CC PACIENTE"] = df_raw.iloc[:, 3].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: df_target["TURNO"] = df_raw.iloc[:, 21]
+    except Exception: pass
+    try: df_target["GEOREFERENCIA"] = df_raw.iloc[:, 78].fillna("").astype(str)
+    except Exception: pass
+    try: df_target["ESTADO"] = df_raw.iloc[:, 79].fillna("").astype(str)
+    except Exception: pass
+    return df_target.fillna("")
+
+def proc_enfermeria(df_raw):
+    df_target = pd.DataFrame(index=df_raw.index, columns=HEADERS_ESTANDAR)
+    df_target["SERVICIO"] = "NOTA ENFERMERIA" 
+    try: df_target["CC PROFESIONAL"] = df_raw.iloc[:, 44].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: 
+        fechas_dt = pd.to_datetime(df_raw.iloc[:, 1], errors='coerce')
+        df_target["FECHA"] = [l if pd.notna(l) and str(l) not in ('NaT', 'nan', '') else c for l, c in zip(fechas_dt.dt.strftime('%d/%m/%Y').tolist(), df_raw.iloc[:, 1].fillna("").astype(str).tolist())]
+    except Exception: pass
+    try: df_target["CC PACIENTE"] = df_raw.iloc[:, 3].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: df_target["TURNO"] = df_raw.iloc[:, 21]
+    except Exception: pass
+    try: df_target["GEOREFERENCIA"] = df_raw.iloc[:, 45].fillna("").astype(str)
+    except Exception: pass
+    try: df_target["ESTADO"] = df_raw.iloc[:, 46].fillna("").astype(str)
+    except Exception: pass
+    return df_target.fillna("")
+
+def proc_actividades(df_raw):
+    df_target = pd.DataFrame(index=df_raw.index, columns=HEADERS_ESTANDAR)
+    df_target["SERVICIO"] = "CUIDADOR" 
+    try: df_target["CC PROFESIONAL"] = df_raw.iloc[:, 35].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: 
+        fechas_dt = pd.to_datetime(df_raw.iloc[:, 1], errors='coerce')
+        df_target["FECHA"] = [l if pd.notna(l) and str(l) not in ('NaT', 'nan', '') else c for l, c in zip(fechas_dt.dt.strftime('%d/%m/%Y').tolist(), df_raw.iloc[:, 1].fillna("").astype(str).tolist())]
+    except Exception: pass
+    try: 
+        fechas_crea_dt = pd.to_datetime(df_raw.iloc[:, 41], errors='coerce')
+        df_target["FECHA CREACION"] = [l if pd.notna(l) and str(l) not in ('NaT', 'nan', '') else c for l, c in zip(fechas_crea_dt.dt.strftime('%d/%m/%Y %H:%M').tolist(), df_raw.iloc[:, 41].fillna("").astype(str).tolist())]
+    except Exception: pass
+    try: df_target["CC PACIENTE"] = df_raw.iloc[:, 3].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: df_target["TURNO"] = df_raw.iloc[:, 14]
+    except Exception: pass
+    try: df_target["GEOREFERENCIA"] = df_raw.iloc[:, 39].fillna("").astype(str) 
+    except Exception: pass
+    try: df_target["ESTADO"] = df_raw.iloc[:, 40].fillna("").astype(str) 
+    except Exception: pass
+    return df_target.fillna("")
+
+def proc_invasivos(df_raw):
+    df_target = pd.DataFrame(index=df_raw.index, columns=HEADERS_INVASIVOS)
+    try: df_target["CC PROFESIONAL"] = df_raw.iloc[:, 33].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: 
+        fechas_dt = pd.to_datetime(df_raw.iloc[:, 1], errors='coerce')
+        df_target["FECHA"] = [l if pd.notna(l) and str(l) not in ('NaT', 'nan', '') else c for l, c in zip(fechas_dt.dt.strftime('%d/%m/%Y').tolist(), df_raw.iloc[:, 1].fillna("").astype(str).tolist())]
+    except Exception: pass
+    try: 
+        fechas_crea_dt = pd.to_datetime(df_raw.iloc[:, 39], errors='coerce')
+        df_target["FECHA CREACION"] = [l if pd.notna(l) and str(l) not in ('NaT', 'nan', '') else c for l, c in zip(fechas_crea_dt.dt.strftime('%d/%m/%Y %H:%M').tolist(), df_raw.iloc[:, 39].fillna("").astype(str).tolist())]
+    except Exception: pass
+    try: df_target["CC PACIENTE"] = df_raw.iloc[:, 3].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: df_target["JORNADA"] = df_raw.iloc[:, 14]
+    except Exception: pass
+    try: df_target["GEOREFERENCIA"] = df_raw.iloc[:, 37].fillna("").astype(str) 
+    except Exception: pass
+    try: df_target["ESTADO"] = df_raw.iloc[:, 38].fillna("").astype(str) 
+    except Exception: pass
+    return df_target.fillna("")
+
+def proc_rutero(df_raw):
+    df_target = pd.DataFrame(index=df_raw.index, columns=HEADERS_RUTERO)
+    try: 
+        fechas_dt = pd.to_datetime(df_raw.iloc[:, 17], errors='coerce')
+        df_target["FECHA"] = [l if pd.notna(l) and str(l) not in ('NaT', 'nan', '') else c for l, c in zip(fechas_dt.dt.strftime('%d/%m/%Y').tolist(), df_raw.iloc[:, 17].fillna("").astype(str).tolist())]
+    except Exception: pass
+    try: df_target["DOCUMENTO PROFESIONAL"] = df_raw.iloc[:, 13].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: df_target["PROFESIONAL"] = df_raw.iloc[:, 14].fillna("").astype(str).str.strip()
+    except Exception: pass
+    try: df_target["ASUNTO"] = df_raw.iloc[:, 16].fillna("").astype(str).str.strip()
+    except Exception: pass
+    try: df_target["DOCUMENTO PACIENTE"] = df_raw.iloc[:, 1].astype(str).str.extract(r'(\d+)', expand=False)
+    except Exception: pass
+    try: 
+        c1 = df_raw.iloc[:, 2].fillna("").astype(str)
+        c2 = df_raw.iloc[:, 3].fillna("").astype(str)
+        c3 = df_raw.iloc[:, 4].fillna("").astype(str)
+        df_target["PACIENTE"] = (c1 + " " + c2 + " " + c3).str.replace(r'\s+', ' ', regex=True).str.strip()
+    except Exception: pass
+    try: 
+        tipos_crudos = df_raw.iloc[:, 15].fillna("").astype(str).str.strip()
+        df_target["TIPO"] = tipos_crudos.map(HOMOLOGACION_TIPO).fillna(tipos_crudos)
+    except Exception: pass
+    try: df_target["ESTADO"] = df_raw.iloc[:, 19].fillna("").astype(str).str.strip()
+    except Exception: pass
+    return df_target.fillna("")
+
+# =====================================================================
+# RUTAS DE API
+# =====================================================================
 
 @router.post("/upload/{seccion}/{tipo}")
 async def upload_file(seccion: str, tipo: str, file: UploadFile = File(...)):
@@ -72,33 +256,33 @@ async def upload_file(seccion: str, tipo: str, file: UploadFile = File(...)):
         content = await file.read()
         df_raw = None
         
-        # Intentar múltiples codificaciones porque el portal exporta en diferentes formatos
+        # Intentar múltiples codificaciones de forma segura
         for enc in ['utf-8-sig', 'latin-1', 'cp1252', 'utf-8']:
-            try:
-                for sep in [';', ',']:
-                    try:
-                        temp_df = pd.read_csv(io.BytesIO(content), sep=sep, encoding=enc, dtype=str, on_bad_lines='skip')
-                        if len(temp_df.columns) > 5: # Validar que sí se separaron las columnas
-                            df_raw = temp_df
-                            break
-                    except Exception:
-                        continue
-                if df_raw is not None: break
-            except Exception:
-                continue
+            for sep in [';', ',']:
+                try:
+                    temp_df = pd.read_csv(io.BytesIO(content), sep=sep, encoding=enc, dtype=str, on_bad_lines='skip')
+                    if len(temp_df.columns) > 5:
+                        df_raw = temp_df
+                        break
+                except Exception:
+                    continue
+            if df_raw is not None: break
                 
         if df_raw is None or df_raw.empty:
-            raise ValueError("Formato irreconocible. Verifique que el archivo sea un CSV válido.")
+            raise ValueError("El archivo está vacío o el formato es irreconocible.")
 
-        df_clean = depurar_archivo(df_raw, tipo)
-        
-        if df_clean.empty:
-            raise ValueError("No se extrajeron datos.")
+        # Ejecutar las funciones exactas de tu script original
+        if tipo == "ventilados": df_clean = proc_ventilados(df_raw)
+        elif tipo == "enfermeria": df_clean = proc_enfermeria(df_raw)
+        elif tipo == "actividades": df_clean = proc_actividades(df_raw)
+        elif tipo == "invasivos": df_clean = proc_invasivos(df_raw)
+        elif tipo == "rutero": df_clean = proc_rutero(df_raw)
+        else: raise ValueError(f"Tipo {tipo} no soportado")
 
-        seccion_db = seccion.upper().replace(" ", "_")
-        df_clean['SECCION'] = seccion_db
+        # Guardar en tablas separadas para respetar el # de columnas de cada Excel
+        table_name = seccion.lower().replace(" ", "_")
         
-        df_clean.to_sql("datos_depurados", con=engine, if_exists='append', index=False)
+        df_clean.to_sql(table_name, con=engine, if_exists='append', index=False)
         return {"status": "ok", "filas_procesadas": len(df_clean)}
         
     except Exception as e:
@@ -108,16 +292,16 @@ async def upload_file(seccion: str, tipo: str, file: UploadFile = File(...)):
 @router.get("/data/{seccion}")
 async def get_data(seccion: str):
     try:
-        seccion_db = seccion.upper().replace(" ", "_")
-        query = f"SELECT * FROM datos_depurados WHERE SECCION = '{seccion_db}' ORDER BY rowid DESC"
+        table_name = seccion.lower().replace(" ", "_")
+        query = f"SELECT * FROM {table_name} ORDER BY rowid DESC"
         df = pd.read_sql(query, con=engine)
         return df.fillna('').to_dict(orient='records')
     except: return []
 
 @router.delete("/clear/{seccion}")
 async def clear_data(seccion: str):
+    table_name = seccion.lower().replace(" ", "_")
     with engine.connect() as conn:
-        seccion_db = seccion.upper().replace(" ", "_")
-        conn.execute(text(f"DELETE FROM datos_depurados WHERE SECCION = '{seccion_db}'"))
+        conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
         conn.commit()
     return {"status": "ok"}
