@@ -108,13 +108,15 @@ function App() {
           { field: 'SERVICIO', width: '150px' },
           { field: 'FECHA', width: '120px' },
           { field: 'CC PACIENTE', width: '150px', mono: true },
-          { field: 'TURNO', width: '400px', wrap: true },
+          { field: 'TURNO', width: '120px', wrap: true },
           { field: 'FECHA CREACION', width: '160px' },
           { field: 'LIDER', width: '120px' },
           { field: 'COORDINADOR', width: '120px' },
           { field: 'GEOREFERENCIA', width: '250px' },
           { field: 'ESTADO', width: '120px' },
-          { field: 'CRUCE', width: '120px' }
+          { field: 'CRUCE', width: '120px' },
+          { field: 'EPS', width: '150px' },            // <- NUEVO
+          { field: 'DIFERENCIADOR', width: '150px' }   // <- NUEVO
       ],
       'MEDIOS INVASIVOS': [
           { field: 'CC PROFESIONAL', width: '150px', mono: true, pinned: true },

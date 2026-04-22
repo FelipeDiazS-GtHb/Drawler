@@ -15,8 +15,14 @@ load_dotenv()
 router = APIRouter()
 engine = create_engine("sqlite:///./prototipo.db")
 
-# CABECERAS EXACTAS
-HEADERS_ESTANDAR = ["CC PROFESIONAL", "SERVICIO", "FECHA", "CC PACIENTE", "TURNO", "FECHA CREACION", "LIDER", "COORDINADOR", "GEOREFERENCIA", "ESTADO", "CRUCE"]
+# =====================================================================
+# CABECERAS EXACTAS AL FRONTEND
+# =====================================================================
+HEADERS_ESTANDAR = [
+    "CC PROFESIONAL", "SERVICIO", "FECHA", "CC PACIENTE", "TURNO", 
+    "FECHA CREACION", "LIDER", "COORDINADOR", "GEOREFERENCIA", "ESTADO", 
+    "CRUCE", "EPS", "DIFERENCIADOR"
+]
 HEADERS_INVASIVOS = ["CC PROFESIONAL", "FECHA", "CC PACIENTE", "JORNADA", "FECHA CREACION", "LIDER", "COORDINADOR", "GEOREFERENCIA", "ESTADO"]
 HEADERS_RUTERO = ["FECHA", "DOCUMENTO PROFESIONAL", "PROFESIONAL", "ASUNTO", "DOCUMENTO PACIENTE", "PACIENTE", "TIPO", "ESTADO"]
 
@@ -53,68 +59,88 @@ HOMOLOGACION_TIPO = {
 }
 
 # =====================================================================
-# FUNCIÓN BIGQUERY PARA GOOGLE SHEETS
+# FUNCIÓN BIGQUERY Y CONCATENACIÓN (CRUCE Y DIFERENCIADOR)
 # =====================================================================
-def aplicar_cruce_bigquery_sheets(df_target):
+def bigquery_notasEyc_liderCoord(df_target):
     """
-    Optimización de cuota: Busca pacientes únicos, agrupa consultas y 
-    utiliza la API de visualización para ahorrar límites de lectura.
+    Procesa el cruce de datos con Google Sheets para obtener Líder, Coordinador y EPS.
+    Calcula el Diferenciador basado en el servicio y genera la llave de Cruce única.
     """
     sheet_id = os.getenv("SHEET_ID_MAESTRO", "1xo5EzCA0tla56ENzeiuoHZd-mJ5v1R813zmyNTFkEqE")
     sheet_name = os.getenv("SHEET_NAME_COORDINADORES", "COORDINADORES")
 
+    # 1. CÁLCULO DE DIFERENCIADOR (REPLICA EXACTA DE TU IMAGEN DE EXCEL)
+    # Lógica: VENTILADO -> CUIDADOR -> ENFERMERIA -> TERAPIAS (por defecto)
+    def calcular_diferenciador(servicio):
+        s = str(servicio).upper()
+        if "VENTILADO" in s:
+            return "VENTILADO"
+        elif "CUIDADOR" in s:
+            return "CUIDADOR"
+        elif "ENFERMER" in s:
+            return "ENFERMERIA"
+        else:
+            return "TERAPIAS"
+
+    # Asignamos el valor calculado a la columna DIFERENCIADOR
+    df_target['DIFERENCIADOR'] = df_target['SERVICIO'].apply(calcular_diferenciador)
+
+    # 2. CONCATENACIÓN CRUCE (CC PACIENTE + FECHA + TURNO/JORNADA) SIN "/"
+    # Determinamos si el archivo tiene columna TURNO o JORNADA
+    col_v = 'TURNO' if 'TURNO' in df_target.columns else 'JORNADA'
+    
+    # Limpiamos los datos para asegurar una concatenación sin errores
+    c_pac = df_target['CC PACIENTE'].astype(str).replace('nan', '').str.replace(r'\.0$', '', regex=True).str.strip()
+    c_fec = df_target['FECHA'].astype(str).replace('nan', '').str.strip()
+    c_tur = df_target[col_v].astype(str).replace('nan', '').str.strip()
+    
+    # Unimos y eliminamos todos los "/" del resultado final para la columna CRUCE
+    df_target['CRUCE'] = (c_pac + c_fec + c_tur).str.replace('/', '', regex=False)
+    
+    # Actualizamos CC PACIENTE en el DataFrame con el valor limpio para la búsqueda en Sheets
+    df_target['CC PACIENTE'] = c_pac
+    
     if not sheet_id:
-        print(" [!] Aviso: SHEET_ID_MAESTRO no configurado en .env. Se omite el cruce.")
+        print(" [!] Aviso: SHEET_ID_MAESTRO no configurado en el archivo .env")
         return df_target
 
-    # 1. LIMPIEZA DE .0 Y EXTRACCIÓN DE CÉDULAS
-    df_target['CC PACIENTE'] = df_target['CC PACIENTE'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-    cedulas_unicas = [c for c in df_target['CC PACIENTE'].unique().tolist() if c and c.lower() != 'nan' and len(c) > 3]
+    # Obtenemos lista de pacientes únicos para optimizar la cuota de la API
+    cedulas_unicas = [c for c in df_target['CC PACIENTE'].unique().tolist() if c and len(c) > 3]
     
     if not cedulas_unicas: 
         return df_target
         
     try:
-        print(f"Consultando {len(cedulas_unicas)} pacientes únicos en Sheets (Hoja: {sheet_name})...")
-        
-        # 2. Autenticación con Cuenta de Servicio
-        scope = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        # Configuración de credenciales y acceso
+        scope = ["https://www.googleapis.com/auth/spreadsheets.readonly", "https://www.googleapis.com/auth/drive.readonly"]
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
         access_token = creds.get_access_token().access_token
         headers = {"Authorization": f"Bearer {access_token}"}
         
-        # 3. PROCESAMIENTO POR LOTES (Para no romper la URL)
         chunk_size = 30 
         resultados_maestro = []
         
+        # Procesamiento por lotes para evitar errores de URL demasiado larga (HTTP 400)
         for i in range(0, len(cedulas_unicas), chunk_size):
             lote = cedulas_unicas[i:i+chunk_size]
-            
-            # ====================================================================
-            # LA MAGIA PARA QUE NO FALLE EL CRUCE:
-            # Buscamos en Sheets como Texto Y como Número (A='123' OR A=123)
-            # ====================================================================
-            condiciones_lista = []
-            for c in lote:
-                if c.isdigit():
-                    condiciones_lista.append(f"(A='{c}' OR A={c})")
-                else:
-                    condiciones_lista.append(f"A='{c}'")
-                    
+            condiciones_lista = [f"(A='{c}' OR A={c})" if c.isdigit() else f"A='{c}'" for c in lote]
             condiciones = " OR ".join(condiciones_lista)
-            sql_query = f"SELECT A, C, D WHERE {condiciones}"
+            
+            # CONSULTA SQL: Extraemos A(Doc), C(Lider), D(Coord), I(EPS según imagen)
+            sql_query = f"SELECT A, C, D, I WHERE {condiciones}"
             
             url = (
                 f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?"
                 f"tq={urllib.parse.quote(sql_query)}&sheet={urllib.parse.quote(sheet_name)}"
+                f"&access_token={access_token}"
             )
             
             res = requests.get(url, headers=headers)
             if res.status_code != 200: 
-                print(f"  [X] Error HTTP {res.status_code} en lote.")
+                print(f" [X] Error en petición a Sheets: {res.status_code}")
                 continue
             
-            # Procesar respuesta
+            # Parseo de la respuesta JSON de Google Visualization API
             text_resp = res.text
             json_str = text_resp[text_resp.find('{'):text_resp.rfind('}')+1]
             data = json.loads(json_str)
@@ -123,41 +149,41 @@ def aplicar_cruce_bigquery_sheets(df_target):
                 for row in data['table']['rows']:
                     c_list = row.get('c', [])
                     
-                    # EXTRACCIÓN SEGURA (Evita IndexError si la celda está vacía)
-                    doc = str(c_list[0]['v']) if len(c_list) > 0 and c_list[0] and c_list[0].get('v') is not None else ''
-                    lider = str(c_list[1]['v']) if len(c_list) > 1 and c_list[1] and c_list[1].get('v') is not None else ''
-                    coord = str(c_list[2]['v']) if len(c_list) > 2 and c_list[2] and c_list[2].get('v') is not None else ''
+                    def get_val(idx):
+                        if idx < len(c_list) and c_list[idx]:
+                            # Priorizamos el valor formateado 'f' para evitar formatos tipo Date()
+                            return str(c_list[idx].get('f', c_list[idx].get('v', ''))).strip()
+                        return ''
+
+                    doc = get_val(0)        # Columna A
+                    lider = get_val(1)      # Columna C
+                    coord = get_val(2)      # Columna D
+                    eps = get_val(3)        # Columna I
                     
-                    resultados_maestro.append([doc, lider, coord])
+                    resultados_maestro.append([doc, lider, coord, eps])
 
-        if not resultados_maestro:
-            print("  [-] La consulta se envió correctamente, pero Sheets devolvió 0 coincidencias.")
-            return df_target
-
-        # 4. CRUCE FINAL EN MEMORIA (Pandas)
-        df_bq = pd.DataFrame(resultados_maestro, columns=['DocPac_M', 'LIDER_M', 'COORD_M'])
-        # Limpiar el documento maestro de cualquier '.0' que haya regresado Google
-        df_bq['DocPac_M'] = df_bq['DocPac_M'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        
-        df_merged = pd.merge(df_target, df_bq, left_on='CC PACIENTE', right_on='DocPac_M', how='left')
-        
-        # Asignar los valores a la tabla
-        df_target['LIDER'] = df_merged['LIDER_M'].fillna('')
-        df_target['COORDINADOR'] = df_merged['COORD_M'].fillna('')
-        
-        if 'CRUCE' in df_target.columns:
-            df_target['CRUCE'] = df_target['LIDER'].apply(lambda x: "CRUCE OK" if x != "" else "SIN DATOS EN MAESTRO")
+        if resultados_maestro:
+            # Consolidamos resultados y limpiamos documentos
+            df_bq = pd.DataFrame(resultados_maestro, columns=['DocM', 'LidM', 'CoordM', 'EpsM'])
+            df_bq['DocM'] = df_bq['DocM'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
             
-        print(f"  ✓ Query exitosa: Se trajeron datos de {len(df_bq)} pacientes.")
+            # Unión final de datos (Left Join)
+            df_merged = pd.merge(df_target, df_bq, left_on='CC PACIENTE', right_on='DocM', how='left')
+            
+            # Asignación de los valores obtenidos a las columnas correspondientes
+            df_target['LIDER'] = df_merged['LidM'].fillna('')
+            df_target['COORDINADOR'] = df_merged['CoordM'].fillna('')
+            df_target['EPS'] = df_merged['EpsM'].fillna('')
+            
+        print(f" ✓ Cruce finalizado: Diferenciador '{df_target['DIFERENCIADOR'].iloc[0]}' aplicado y {len(df_target)} registros procesados.")
         
     except Exception as e:
-        print(f"  [X] Fallo inesperado en el cruce de datos: {str(e)}")
+        print(f" [X] Error en bigquery_notasEyc_liderCoord: {str(e)}")
         
     return df_target
 
-
 # =====================================================================
-# FUNCIONES DE PROCESAMIENTO
+# FUNCIONES DE PROCESAMIENTO INICIALES
 # =====================================================================
 def proc_ventilados(df_raw):
     df_target = pd.DataFrame(index=df_raw.index, columns=HEADERS_ESTANDAR)
@@ -271,14 +297,12 @@ def proc_rutero(df_raw):
     return df_target.fillna("")
 
 # =====================================================================
-# RUTAS DE API
+# UPLOAD ENDPOINT
 # =====================================================================
-
 @router.post("/upload/{seccion}/{tipo}")
 async def upload_file(seccion: str, tipo: str, file: UploadFile = File(...)):
     try:
         content = await file.read()
-        # Detección de separadores dinámicos
         df_raw = None
         for enc in ['utf-8-sig', 'latin-1', 'cp1252']:
             for sep in [';', ',']:
@@ -292,7 +316,6 @@ async def upload_file(seccion: str, tipo: str, file: UploadFile = File(...)):
                 
         if df_raw is None: raise ValueError("Formato de CSV no reconocido.")
 
-        # Lógica de procesamiento original
         if tipo == "ventilados": df_clean = proc_ventilados(df_raw)
         elif tipo == "enfermeria": df_clean = proc_enfermeria(df_raw)
         elif tipo == "actividades": df_clean = proc_actividades(df_raw)
@@ -300,9 +323,9 @@ async def upload_file(seccion: str, tipo: str, file: UploadFile = File(...)):
         elif tipo == "rutero": df_clean = proc_rutero(df_raw)
         else: raise ValueError(f"Tipo {tipo} no soportado")
 
-        # EJECUTAR CRUCE OPTIMIZADO PARA NOTAS EYC
+        # EJECUTAR CRUCE Y CONCATENACIÓN PARA NOTAS EYC
         if tipo in ["ventilados", "enfermeria", "actividades"]:
-            df_clean = aplicar_cruce_bigquery_sheets(df_clean)
+            df_clean = bigquery_notasEyc_liderCoord(df_clean)
 
         table_name = seccion.lower().replace(" ", "_")
         df_clean.to_sql(table_name, con=engine, if_exists='append', index=False)
